@@ -1,2 +1,0 @@
-timeout 0.3
-random 73 73 4
