@@ -40,6 +40,13 @@ __global__ void matrixMul(int ny, int nx, int nny, float* norData, float* result
     int ic = blockIdx.x;
     int jc = blockIdx.y;
 
+    float v[8][8];
+    for (int x = 0; x < 8; x++) {
+        for (int y = 0; y < 8; y++) {
+            v[x][y] = 0;
+        }
+    }
+
     for (int k = 0; k < nx; k++) {
         float x[8];
         float y[8];
@@ -56,11 +63,17 @@ __global__ void matrixMul(int ny, int nx, int nny, float* norData, float* result
 
         for (int ib = 0; ib < 8; ++ib) {
             for (int jb = 0; jb < 8; ++jb) {
-                int i = ic*64 + ib*8 + ia;
-                int j = jc*64 + jb*8 + ja;
-                if (i < ny && j <= i) {
-                    result[j*ny + i] += x[ib] * y[jb];
-                }
+                v[ib][jb] += x[ib] * y[jb];
+            }
+        }
+    }
+
+    for (int ib = 0; ib < 8; ++ib) {
+        for (int jb = 0; jb < 8; ++jb) {
+            int i = ic*64 + ib*8 + ia;
+            int j = jc*64 + jb*8 + ja;
+            if (i < ny && j <= i) {
+                result[j*ny + i] = v[ib][jb];
             }
         }
     }
