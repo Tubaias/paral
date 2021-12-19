@@ -61,39 +61,47 @@ __global__ void matrixMul(int ny, int nx, int nny, int nnx, float* norData, floa
     }
 }
 
+__global__ void normalize(int ny, int nx, int nnx, float* norData, float* data) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= ny) { return; }
+
+    float sum = 0.0;
+    float sqsum = 0.0;
+
+    for (int col = 0; col < nx; col++) {
+        sum += data[row*nx + col];
+    }
+
+    float mean = sum / nx;
+    for (int col = 0; col < nx; col++) {
+        float normal = data[row*nx + col] - mean;
+        norData[row*nnx + col] = normal;
+        sqsum += normal * normal;
+    }
+
+    float sumsqrt = sqrt(sqsum);
+    for (int col = 0; col < nx; col++) {
+        norData[row*nnx + col] = norData[row*nnx + col] / sumsqrt;
+    }
+}
+
 void correlate(int ny, int nx, const float *data, float *result) {
     int nny = roundup(ny, 64);
     int nnx = roundup(nx, 4);
     float* norData = new float[nny*nnx]{0};
-    
-    // normalization
-    for (int row = 0; row < ny; row++) {
-        float sum = 0.0;
-        float sqsum = 0.0;
 
-        for (int col = 0; col < nx; col++) {
-            sum += data[row*nx + col];
-        }
-
-        float mean = sum / nx;
-        for (int col = 0; col < nx; col++) {
-            float normal = data[row*nx + col] - mean;
-            norData[row*nnx + col] = normal;
-            sqsum += normal * normal;
-        }
-
-        float sumsqrt = sqrt(sqsum);
-        for (int col = 0; col < nx; col++) {
-            norData[row*nnx + col] = norData[row*nnx + col] / sumsqrt;
-        }
-    }
-
+    float* dataGPU = NULL;
+    cudaMalloc((void**)&dataGPU, ny * nx * sizeof(float));
+    cudaMemcpy(dataGPU, data, ny * nx * sizeof(float), cudaMemcpyHostToDevice);
     float* norDataGPU = NULL;
     cudaMalloc((void**)&norDataGPU, nny * nnx * sizeof(float));
     cudaMemcpy(norDataGPU, norData, nny * nnx * sizeof(float), cudaMemcpyHostToDevice);
     float* resultGPU = NULL;
     cudaMalloc((void**)&resultGPU, ny * ny * sizeof(float));
     cudaMemcpy(resultGPU, result, ny * ny * sizeof(float), cudaMemcpyHostToDevice);
+
+    // normalization
+    normalize<<<divup(ny, 64),64>>>(ny, nx, nnx, norDataGPU, dataGPU);
 
     // matrix multiplication
     dim3 dimBlock(8, 8);
