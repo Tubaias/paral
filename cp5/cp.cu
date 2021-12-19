@@ -1,7 +1,5 @@
-#include <vector>
 #include <math.h>
 #include <cstdlib>
-#include <iostream>
 #include <cuda_runtime.h>
 
 static inline int divup(int a, int b) {
@@ -12,55 +10,44 @@ static inline int roundup(int a, int b) {
     return divup(a, b) * b;
 }
 
-static inline void check(cudaError_t err, const char* context) {
-    if (err != cudaSuccess) {
-        std::cerr << "CUDA error: " << context << ": "
-            << cudaGetErrorString(err) << std::endl;
-        std::exit(EXIT_FAILURE);
-    }
-}
-
-#define CHECK(x) check(x, #x)
-
-__global__ void matrixMul2(int ny, int nx, float* norData, float* result) {
-    int i = threadIdx.x + blockIdx.x * blockDim.x;
-    int j = threadIdx.y + blockIdx.y * blockDim.y;
-    if (i >= ny || j > i) { return; }
-
-    for (int k = 0; k < nx; k++) {
-        float x = norData[i*nx + k];
-        float y = norData[j*nx + k];
-        result[j*ny + i] += x * y;
-    }
-}
-
-__global__ void matrixMul(int ny, int nx, int nny, float* norData, float* result) {
+__global__ void matrixMul(int ny, int nx, int nny, int nnx, float* norData, float* result) {
     int ia = threadIdx.x;
     int ja = threadIdx.y;
     int ic = blockIdx.x;
     int jc = blockIdx.y;
-
+    
     float v[8][8]{};
+    __shared__ float xx[4][64];
+    __shared__ float yy[4][64];
 
-    for (int k = 0; k < nx; k++) {
-        float x[8];
-        float y[8];
-
-        for (int ib = 0; ib < 8; ++ib) {
-            int i = ic*64 + ib*8 + ia;
-            x[ib] = norData[i*nx + k];
+    for (int ks = 0; ks < nx; ks += 4) {
+        int ija = ja * 8 + ia;
+        int i = ic * 64 + ija;
+        int j = jc * 64 + ija;
+        for (int f = 0; f < 4; ++f) {
+            int k = ks + f;
+            xx[f][ija] = norData[i*nnx + k];
+            yy[f][ija] = norData[j*nnx + k];
         }
 
-        for (int jb = 0; jb < 8; ++jb) {
-            int j = jc*64 + jb*8 + ja;
-            y[jb] = norData[j*nx + k];
-        }
-
-        for (int ib = 0; ib < 8; ++ib) {
+        __syncthreads();
+        
+        #pragma unroll
+        for (int f = 0; f < 4; ++f) {
+            float y[8];
             for (int jb = 0; jb < 8; ++jb) {
-                v[ib][jb] += x[ib] * y[jb];
+                y[jb] = yy[f][jb*8 + ja];
+            }
+
+            for (int ib = 0; ib < 8; ++ib) {
+                float x = xx[f][ib*8 + ia];
+                for (int jb = 0; jb < 8; ++jb) {
+                    v[ib][jb] += x * y[jb];
+                }
             }
         }
+
+        __syncthreads();
     }
 
     for (int ib = 0; ib < 8; ++ib) {
@@ -76,7 +63,8 @@ __global__ void matrixMul(int ny, int nx, int nny, float* norData, float* result
 
 void correlate(int ny, int nx, const float *data, float *result) {
     int nny = roundup(ny, 64);
-    float* norData = new float[nny*nx]{0};
+    int nnx = roundup(nx, 4);
+    float* norData = new float[nny*nnx]{0};
     
     // normalization
     for (int row = 0; row < ny; row++) {
@@ -90,32 +78,31 @@ void correlate(int ny, int nx, const float *data, float *result) {
         float mean = sum / nx;
         for (int col = 0; col < nx; col++) {
             float normal = data[row*nx + col] - mean;
-            norData[row*nx + col] = normal;
+            norData[row*nnx + col] = normal;
             sqsum += normal * normal;
         }
 
         float sumsqrt = sqrt(sqsum);
         for (int col = 0; col < nx; col++) {
-            norData[row*nx + col] = norData[row*nx + col] / sumsqrt;
+            norData[row*nnx + col] = norData[row*nnx + col] / sumsqrt;
         }
     }
 
     float* norDataGPU = NULL;
-    CHECK(cudaMalloc((void**)&norDataGPU, nny * nx * sizeof(float)));
-    CHECK(cudaMemcpy(norDataGPU, norData, nny * nx * sizeof(float), cudaMemcpyHostToDevice));
+    cudaMalloc((void**)&norDataGPU, nny * nnx * sizeof(float));
+    cudaMemcpy(norDataGPU, norData, nny * nnx * sizeof(float), cudaMemcpyHostToDevice);
     float* resultGPU = NULL;
-    CHECK(cudaMalloc((void**)&resultGPU, ny * ny * sizeof(float)));
-    CHECK(cudaMemcpy(resultGPU, result, ny * ny * sizeof(float), cudaMemcpyHostToDevice));
+    cudaMalloc((void**)&resultGPU, ny * ny * sizeof(float));
+    cudaMemcpy(resultGPU, result, ny * ny * sizeof(float), cudaMemcpyHostToDevice);
 
     // matrix multiplication
     dim3 dimBlock(8, 8);
     dim3 dimGrid(nny / 64, nny / 64);
-    matrixMul<<<dimGrid, dimBlock>>>(ny, nx, nny, norDataGPU, resultGPU);
-    CHECK(cudaGetLastError());
+    matrixMul<<<dimGrid, dimBlock>>>(ny, nx, nny, nnx, norDataGPU, resultGPU);
 
     // finish
-    CHECK(cudaMemcpy(result, resultGPU, ny * ny * sizeof(float), cudaMemcpyDeviceToHost));
-    CHECK(cudaFree(norDataGPU));
-    CHECK(cudaFree(resultGPU));
+    cudaMemcpy(result, resultGPU, ny * ny * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaFree(norDataGPU);
+    cudaFree(resultGPU);
     delete[] norData;
 }
