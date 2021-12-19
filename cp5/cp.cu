@@ -110,6 +110,7 @@ void correlate(int ny, int nx, const float *data, float *result) {
 
     // finish
     cudaMemcpy(result, resultGPU, ny * ny * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaFree(dataGPU);
     cudaFree(norDataGPU);
     cudaFree(resultGPU);
     delete[] norData;
